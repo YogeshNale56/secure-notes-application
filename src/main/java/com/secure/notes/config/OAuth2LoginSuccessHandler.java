@@ -42,93 +42,65 @@ public class OAuth2LoginSuccessHandler extends SavedRequestAwareAuthenticationSu
     @Value("${frontend.url}")
     private String frontendUrl;
 
-    String username;
-    String idAttributeKey;
-
     @Override
     public void onAuthenticationSuccess(HttpServletRequest request, HttpServletResponse response, Authentication authentication) throws ServletException, IOException {
         OAuth2AuthenticationToken oAuth2AuthenticationToken = (OAuth2AuthenticationToken) authentication;
-        if ("github".equals(oAuth2AuthenticationToken.getAuthorizedClientRegistrationId()) || "google".equals(oAuth2AuthenticationToken.getAuthorizedClientRegistrationId())) {
-            DefaultOAuth2User principal = (DefaultOAuth2User) authentication.getPrincipal();
-            Map<String, Object> attributes = principal.getAttributes();
-            String email = attributes.getOrDefault("email", "").toString();
-            String name = attributes.getOrDefault("name", "").toString();
-            if ("github".equals(oAuth2AuthenticationToken.getAuthorizedClientRegistrationId())) {
-                username = attributes.getOrDefault("login", "").toString();
-                idAttributeKey = "id";
-            } else if ("google".equals(oAuth2AuthenticationToken.getAuthorizedClientRegistrationId())) {
-                username = email.split("@")[0];
-                idAttributeKey = "sub";
-            } else {
-                username = "";
-                idAttributeKey = "id";
-            }
-            System.out.println("HELLO OAUTH: " + email + " : " + name + " : " + username);
+        DefaultOAuth2User principal = (DefaultOAuth2User) authentication.getPrincipal();
+        Map<String, Object> attributes = principal.getAttributes();
+        String email = attributes.getOrDefault("email", "").toString();
+        String name = attributes.getOrDefault("name", "").toString();
+        String clientRegistrationId = oAuth2AuthenticationToken.getAuthorizedClientRegistrationId();
 
-            userService.findByEmail(email)
-                    .ifPresentOrElse(user -> {
-                        DefaultOAuth2User oauthUser = new DefaultOAuth2User(
-                                List.of(new SimpleGrantedAuthority(user.getRole().getRoleName().name())),
-                                attributes,
-                                idAttributeKey
-                        );
-                        Authentication securityAuth = new OAuth2AuthenticationToken(
-                                oauthUser,
-                                List.of(new SimpleGrantedAuthority(user.getRole().getRoleName().name())),
-                                oAuth2AuthenticationToken.getAuthorizedClientRegistrationId()
-                        );
-                        SecurityContextHolder.getContext().setAuthentication(securityAuth);
-                    }, () -> {
-                        User newUser = new User();
-                        Optional<Role> userRole = roleRepository.findByRoleName(AppRole.ROLE_USER); // Fetch existing role
-                        if (userRole.isPresent()) {
-                            newUser.setRole(userRole.get()); // Set existing role
-                        } else {
-                            // Handle the case where the role is not found
-                            throw new RuntimeException("Default role not found");
-                        }
-                        newUser.setEmail(email);
-                        newUser.setUserName(username);
-                        newUser.setSignUpMethod(oAuth2AuthenticationToken.getAuthorizedClientRegistrationId());
-                        userService.registerUser(newUser);
-                        DefaultOAuth2User oauthUser = new DefaultOAuth2User(
-                                List.of(new SimpleGrantedAuthority(newUser.getRole().getRoleName().name())),
-                                attributes,
-                                idAttributeKey
-                        );
-                        Authentication securityAuth = new OAuth2AuthenticationToken(
-                                oauthUser,
-                                List.of(new SimpleGrantedAuthority(newUser.getRole().getRoleName().name())),
-                                oAuth2AuthenticationToken.getAuthorizedClientRegistrationId()
-                        );
-                        SecurityContextHolder.getContext().setAuthentication(securityAuth);
-                    });
+        String username;
+        String idAttributeKey;
+
+        if ("github".equals(clientRegistrationId)) {
+            username = attributes.getOrDefault("login", "").toString();
+            idAttributeKey = "id";
+        } else if ("google".equals(clientRegistrationId)) {
+            username = email.split("@")[0];
+            idAttributeKey = "sub";
+        } else {
+            username = email.split("@")[0];
+            idAttributeKey = "sub";
         }
-        this.setAlwaysUseDefaultTargetUrl(true);
+
+        System.out.println("OAuth2 Login Success: " + email + " : " + name + " : " + username);
+
+        User user = userService.findByEmail(email).orElseGet(() -> {
+            User newUser = new User();
+            Role userRole = roleRepository.findByRoleName(AppRole.ROLE_USER)
+                    .orElseThrow(() -> new RuntimeException("Default role not found"));
+            newUser.setRole(userRole);
+            newUser.setEmail(email);
+            newUser.setUserName(username);
+            newUser.setSignUpMethod(clientRegistrationId);
+            return userService.registerUser(newUser);
+        });
+
+        // Update Security Context with database authorities
+        DefaultOAuth2User oauthUser = new DefaultOAuth2User(
+                List.of(new SimpleGrantedAuthority(user.getRole().getRoleName().name())),
+                attributes,
+                idAttributeKey
+        );
+        Authentication securityAuth = new OAuth2AuthenticationToken(
+                oauthUser,
+                List.of(new SimpleGrantedAuthority(user.getRole().getRoleName().name())),
+                clientRegistrationId
+        );
+        SecurityContextHolder.getContext().setAuthentication(securityAuth);
 
         // JWT TOKEN LOGIC
-        DefaultOAuth2User oauth2User = (DefaultOAuth2User) authentication.getPrincipal();
-        Map<String, Object> attributes = oauth2User.getAttributes();
+        Set<SimpleGrantedAuthority> authorities = new HashSet<>(List.of(new SimpleGrantedAuthority(user.getRole().getRoleName().name())));
 
-        // Extract necessary attributes
-        String email = (String) attributes.get("email");
-        System.out.println("OAuth2LoginSuccessHandler: " + username + " : " + email);
-
-        Set<SimpleGrantedAuthority> authorities =new HashSet<>(oauth2User.getAuthorities().stream()
-                .map(authority -> new SimpleGrantedAuthority(authority.getAuthority()))
-                .collect(Collectors.toList()));
-
-        User user=userService.findByEmail(email).orElseThrow(
-                ()->new RuntimeException("User not found"));
-        authorities.add(new SimpleGrantedAuthority(user.getRole().getRoleName().name()));
-
-        // Create UserDetailsImpl instance
+        // Create UserDetailsImpl instance for JWT generation
         UserDetailsImpl userDetails = new UserDetailsImpl(
+                user.getUserId(),
+                user.getUserName(),
+                user.getEmail(),
                 null,
-                username,
-                email,
-                null,
-                false,
+                user.isTwoFactorEnabled(),
                 authorities
         );
 
@@ -139,6 +111,8 @@ public class OAuth2LoginSuccessHandler extends SavedRequestAwareAuthenticationSu
         String targetUrl = UriComponentsBuilder.fromUriString(frontendUrl + "/oauth2/redirect")
                 .queryParam("token", jwtToken)
                 .build().toUriString();
+
+        this.setAlwaysUseDefaultTargetUrl(true);
         this.setDefaultTargetUrl(targetUrl);
         super.onAuthenticationSuccess(request, response, authentication);
     }

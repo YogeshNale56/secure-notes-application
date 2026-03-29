@@ -61,13 +61,14 @@ public class SecurityConfig {
                                 "/swagger-ui/**",
                                 "/v3/api-docs/**",
                                 "/v3/api-docs.yaml",
-                                "/oauth2/**"
+                                "/oauth2/**",
+                                "/error"
                         ).permitAll()
                         .anyRequest().authenticated()
                 )
                 .exceptionHandling(exception -> exception.authenticationEntryPoint(unauthorizedHandler))
                 .oauth2Login(oauth2 -> oauth2.successHandler(oAuth2LoginSuccessHandler));
-                
+
 
         // ✅ Enable JWT filter
         http.addFilterBefore(authenticationJwtTokenFilter(), UsernamePasswordAuthenticationFilter.class);
